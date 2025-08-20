@@ -5,38 +5,34 @@ library(patchwork)
 library(rstatix)
 library(dplyr)
 library(binom)
-library(patchwork)
 
 
+#Data from DGRP-517+ crossed with 9 DGRP lines and w1118
 DGRP<-read_excel("./1DGRP_cross.xlsx")
-
-eggs<-read_excel("./eggs.xlsx")
-egg_28152<-read_excel("./28152_eggs.xlsx")
-
-
-###################################
-###################################
-###################################LARGE DGRP PLOT
-###################################
+#Data for maternal or paternally infected embryos
+eggs<-read_excel("./DGRP405_DGRP530_embryos.xlsx")
+#Data for maternal and paternally infected embryos at 2 days and 8 days
+egg_28152<-read_excel("./DGRP189_embryos_over_time.xlsx")
 
 
+##Shared Y range to standaardize the Y-axis on subsequent plots
 shared_y_range <- c(1e-9, 1e5)
 
-#Make pseudocounts for 0 infections
+#Make pseudocounts for 0 infections so they are farther away from the postiive but lowly infected samples
 DGRP <- DGRP %>%
   mutate(
     dCt_modified = ifelse(dCt == 0, 1e-10, dCt),
     is_pseudocount = ifelse(dCt == 0, "pseudocount", "real")
   )
 
-# Calculate p-values and convert to significance stars
+# Calculate p-values and convert to significance stars; Wilcoxon test excluding 0 values
 
 p_values <- DGRP %>%
   group_by(Generation, Cross) %>%
-  filter(n_distinct(Parent_Infected) == 2) %>%   # filter here so the test runs only when valid
+   filter((Infected)=="Yes")%>%
   summarise(
     p_value = tryCatch(
-      wilcox.test(dCt_modified ~ Parent_Infected)$p.value,
+      wilcox.test(dCt ~ Parent_Infected)$p.value,
       error = function(e) NA_real_
     ),
     .groups = "drop"
@@ -52,12 +48,37 @@ p_values <- DGRP %>%
   )
 
 
-# Plot
-plot <- ggplot(data = DGRP, aes(x = Parent_Infected, y = dCt, group = Cross, Generation)) +
+####Medians for each Generation, Cross, Parent Infected Type
+medians <- DGRP %>%
+  filter(Infected == "Yes") %>%
+  group_by(Generation, Cross, Parent_Infected) %>%
+  summarise(
+    median_value = median(dCt_modified, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+###### number of infected flies per generation and parent infected
+summary_table <- DGRP %>%
+  group_by(Parent_Infected, Infected, Generation) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = Infected,
+    values_from = count,
+    values_fill = 0
+  )
+
+summary_table
+
+
+
+
+# Figure 1A
+plot <- ggplot(data = DGRP, aes(x = Parent_Infected, y = dCt)) +
   geom_jitter(
     height = 0, width = 0.2,
-    aes(color = as.factor(Replicate), shape = Offspring_Sex, alpha = is_pseudocount), size=1.5
-  ) +
+    aes(color = as.factor(Replicate), shape = Offspring_Sex), size=1.5
+  , show.legend=FALSE) +
   scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.3), guide = FALSE) +
   facet_grid(Generation ~ Cross, drop = TRUE) +
   theme(strip.text.x.top = element_text(size = 6)) +
@@ -77,60 +98,117 @@ plot <- ggplot(data = DGRP, aes(x = Parent_Infected, y = dCt, group = Cross, Gen
   coord_cartesian(clip = "off")+theme_bw()+
   scale_color_brewer(palette= "Dark2")+
   theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
-
 # Show the plot
 plot
 
 
+###Adds the X to DGRP-405
+missing_points <- tibble(
+  Cross = rep("DGRP-405", 3),                    
+  Generation = c("F1", "F2", "F3"),              
+  Parent_Infected = "Paternal", levels = levels(DGRP$Parent_Infected),
+  dCt = 1e-3                                     
+)
+
+# Add black X's to the plot
+plot <- plot +
+  geom_point(
+    data = missing_points,
+    aes(x = Parent_Infected, y = dCt),
+    inherit.aes = FALSE,
+    color = "black",
+    shape = 4,
+    size = 3
+  )
+
+plot
   
 
-########## GEN ON THE X
-p_values_by_generation <- DGRP %>%
-  group_by(Cross, Parent_Infected) %>%
+#Figure 1C
+stats_asterisks_gen <- DGRP %>%
+  filter(Infected %in% c("Yes", "No"),
+         Generation %in% c("F1", "F2", "F3")) %>%
+  group_by(Cross, Parent_Infected, Generation) %>%
   summarise(
-    p_value = tryCatch(
-      kruskal.test(dCt_modified ~ Generation)$p.value,
-      error = function(e) NA_real_
-    ),
+    infected_count   = sum(Infected == "Yes", na.rm = TRUE),
+    uninfected_count = sum(Infected == "No",  na.rm = TRUE),
     .groups = "drop"
   ) %>%
+  group_by(Cross, Parent_Infected) %>%
+  summarise(
+    comparisons = list({
+      gen_pairs <- combn(unique(Generation), 2, simplify = FALSE)
+      
+      map_dfr(gen_pairs, function(pair) {
+        subdata <- filter(cur_data(), Generation %in% pair)
+        
+        mat <- matrix(
+          c(
+            subdata$infected_count[subdata$Generation == pair[1]],
+            subdata$uninfected_count[subdata$Generation == pair[1]],
+            subdata$infected_count[subdata$Generation == pair[2]],
+            subdata$uninfected_count[subdata$Generation == pair[2]]
+          ),
+          nrow = 2,
+          byrow = TRUE
+        )
+        
+        tibble(
+          comparisons = list(pair),  
+          p_value = fisher.test(mat)$p.value
+        )
+      })
+    }),
+    .groups = "drop"
+  ) %>%
+  unnest(comparisons) %>%
   mutate(
-    signif_label = case_when(
-      is.na(p_value) ~ NA_character_,
-      p_value < 0.001 ~ "***",
-      p_value < 0.01 ~ "**",
-      p_value < 0.05 ~ "*",
-      TRUE ~ "ns"
+    p.adj = p.adjust(p_value, method = "bonferroni"),
+    signif = case_when(
+      p.adj <= 0.0001 ~ "****",
+      p.adj <= 0.001  ~ "***",
+      p.adj <= 0.01   ~ "**",
+      p.adj <= 0.05   ~ "*",
+      TRUE            ~ ""
     )
   )
 
-  # Plot
+
+# Plot
   gen_plot <- ggplot(data = DGRP, aes(x = Generation, y = dCt, group = Cross, Parent_Infected)) +
     geom_jitter(
       height = 0, width = 0.2,
-      aes(color = as.factor(Replicate), shape = Offspring_Sex, alpha = is_pseudocount), size=1.5
+      aes(color = as.factor(Replicate), shape = Offspring_Sex), size=1.5
     ) +
     scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.3), guide = FALSE) +
     facet_grid(Parent_Infected ~ Cross, drop = TRUE) +
     theme(strip.text.x.top = element_text(size = 6)) +
     scale_y_log10(limits= shared_y_range)+
     ylab("Galbut virus RNA relative to RpL32 mRNA") +
-    xlab("Original Transmission Type") +
+    xlab("Generation") +
     labs(color = "Replicate Number", shape = "Offspring Sex") +
     coord_cartesian(clip = "off")+theme_bw()+
     scale_color_brewer(palette= "Dark2")+
-    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
-    stat_compare_means(method="kruskal.test")
+    geom_point(
+      data = missing_points,
+      aes(x = "F2", y = dCt),
+      inherit.aes = FALSE,
+      color = "black",
+      shape = 4,
+      size = 3
+    )
+
+  
 
 # Show the plot
 gen_plot
 
 
 
-####male v female parent infected comparison
+####Figure 1B
 mvf_p_values <- DGRP %>%
   group_by(Generation) %>%
-  filter(n_distinct(Parent_Infected) == 2) %>%   # filter here so the test runs only when valid
+  filter((Infected)=="Yes")%>%
   summarise(
     p_value = tryCatch(
       wilcox.test(dCt_modified ~ Parent_Infected)$p.value,
@@ -150,7 +228,7 @@ mvf_p_values <- DGRP %>%
 
 
 
-mvf<- ggplot(DGRP, aes(x = Parent_Infected, y = dCt, group = Parent_Infected,  alpha = is_pseudocount, shape=Offspring_Sex, color=as.factor(Replicate))) +
+mvf<- ggplot(DGRP, aes(x = Parent_Infected, y = dCt, group = Parent_Infected, shape=Offspring_Sex, color=as.factor(Replicate))) +
   geom_jitter(width = 0.2, show.legend = FALSE) +
   ggtitle("") +
   facet_grid(Generation~All) +
@@ -166,56 +244,83 @@ mvf<- ggplot(DGRP, aes(x = Parent_Infected, y = dCt, group = Parent_Infected,  a
     color = "black"
   )+ scale_color_brewer(palette= "Dark2")+ theme(axis.title.y = element_blank(),axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 
-
-
 mvf
 
-(plot + mvf) + 
-  plot_layout(widths=c(1,.1), guides= "collect", axes="collect")+plot_annotation(tag_levels = "A")&theme(legend.position = "bottom")
+
+#Figure 1D
+
+gen_p_values <- DGRP %>%
+  group_by(Parent_Infected) %>%
+  filter((Infected)=="Yes")%>%
+  summarise(
+    p_value = tryCatch(
+      wilcox.test(dCt_modified ~ Parent_Infected)$p.value,
+      error = function(e) NA_real_
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    signif_label = case_when(
+      is.na(p_value) ~ NA_character_,
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+
+
+gen_all<- ggplot(DGRP, aes(x = Generation, y = dCt, shape=Offspring_Sex, color=as.factor(Replicate))) +
+  geom_jitter(width = 0.2, show.legend = FALSE) +
+  ggtitle("") +
+  facet_grid(Parent_Infected~All) +
+  ylab("Galbut virus Ct relative to RpL32") +
+  xlab("Generation") +
+  scale_y_log10(limits= shared_y_range)+
+  coord_cartesian(clip = "off")+theme_bw()+
+ scale_color_brewer(palette= "Dark2")+ theme(axis.title.y = element_blank(),axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+gen_all
 
 
 
 
+# Make the top row first with widths
+top_row <- plot + mvf + 
+  plot_layout(widths = c(3.5, .5), guides = "collect", axes = "collect")
+bottom_row <- gen_plot + gen_all + 
+  plot_layout(widths = c(3.5, .5), guides = "collect", axes = "collect")
+
+# Stack top row over gen_plot
+final <- top_row / bottom_row +
+  plot_annotation(tag_levels = "A") &
+  theme(legend.position = "bottom")
+
+#Final Figure 1
+final
 
 
 
+##Supplemental Figure 1
+ggqqplot(DGRP$dCt)
+shapiro<-shapiro.test(DGRP$dCt)
+shapiro_p <- shapiro$p.value
+pval_text <- paste0("Shapiro-Wilk p = ", signif(shapiro_p, 3))
+
+normal<- ggplot(data= DGRP, aes(x=dCt))+
+  geom_histogram()+scale_x_log10()+  annotate("text", 
+                                              x = Inf, y = Inf, 
+                                              label = pval_text, 
+                                              hjust = 1.1, vjust = 1.5, 
+                                              size = 5, 
+                                              fontface = "italic") +xlab("Galbut virus RNA compared to RpL32 mRNA")+
+  ylab("Count")
+
+normal
 
 
-
-
-
-#####b ig plot arranged differnetly
-
-# Plot
-plot <- ggplot(data = DGRP, aes(x = Cross, y = dCt, group = Cross)) +
-  geom_jitter(
-    height = 0, width = 0.2,
-    aes(color = as.factor(Replicate), shape = Offspring_Sex, alpha = is_pseudocount)
-  ) +
-  scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.3), guide = FALSE) +
-  facet_grid(Parent_Infected ~ Generation, drop = TRUE) +
-  theme(strip.text.x.top = element_text(size = 6)) +
-  scale_y_log10() +
-  ylab("Galbut virus relative to RpL32") +
-  xlab("Infected parent") +
-  labs(color = "Replicate", shape = "Offspring Sex") +
-theme_bw()
-
-# Show the plot
-plot
-
-
-
-
-
-
-
-
-
-
-
-
-######Frequency plot
+#Figure 2
 infection_data <- DGRP %>%
   filter(Infected %in% c("Yes", "No")) %>%
   group_by(Generation, Cross, Parent_Infected) %>%
@@ -234,27 +339,54 @@ infection_data <- DGRP %>%
   )
 
 
+# Prepare asterisks table
+stats_asterisks <- DGRP %>%
+  filter(Infected %in% c("Yes", "No")) %>%
+  group_by(Cross, Generation) %>%
+  filter(all(c("Maternal", "Paternal") %in% Parent_Infected)) %>%
+  group_by(Cross, Generation, Parent_Infected) %>%
+  summarise(
+    infected_count = sum(Infected == "Yes", na.rm = TRUE),
+    uninfected_count = sum(Infected == "No", na.rm = TRUE),
+    .groups = "drop_last"
+  ) %>%
+  summarise(
+    p_value = {
+      mat <- matrix(
+        c(
+          infected_count[Parent_Infected == "Maternal"],
+          uninfected_count[Parent_Infected == "Maternal"],
+          infected_count[Parent_Infected == "Paternal"],
+          uninfected_count[Parent_Infected == "Paternal"]
+        ),
+        nrow = 2,
+        byrow = TRUE
+      )
+      fisher.test(mat)$p.value
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p.adj = p.adjust(p_value, method = "bonferroni"),
+    signif = case_when(
+      p.adj <= 0.0001 ~ "****",
+      p.adj <= 0.001  ~ "***",
+      p.adj <= 0.01   ~ "**",
+      p.adj <= 0.05   ~ "*",
+      TRUE            ~ ""
+    )
+  )
 
+# Add y.position = max of both Maternal/Paternal points in infection_data
+stats_asterisks <- stats_asterisks %>%
+  left_join(
+    infection_data %>%
+      group_by(Cross, Generation) %>%
+      summarise(y.position = max(infection_freq) + 0.05, .groups = "drop"),
+    by = c("Cross", "Generation")
+  )
 
-ggplot(infection_data, aes(x = Cross, y = infection_freq, fill = factor(Cross))) +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.9), show.legend = TRUE) +
-  geom_errorbar(aes(ymin = lower, ymax = upper),
-                position = position_dodge(width = 0.9), width = 0.2) +
-
-  facet_grid(Parent_Infected~Generation) +
-  labs(
-    x = "Parent Originally Infected",
-    y = "Frequency of Infection",
-    title = "Frequency of Infection by Parent Infected, Generation, and Cross"
-  ) +
-  scale_fill_brewer(palette= "Dark2")+
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
-  ylim(0,1.2)+ labs(fill = "Cross")
-
-
-
-
-####line version
+# Plot
 ggplot(infection_data, aes(x = Generation, y = infection_freq, color = Parent_Infected, group = Parent_Infected)) +
   geom_point(size = 2) +
   geom_line() +
@@ -265,78 +397,133 @@ ggplot(infection_data, aes(x = Generation, y = infection_freq, color = Parent_In
     y = "Frequency of Infection",
     color = "Original Transmission Type"
   ) +
-  scale_color_manual(values= c("Maternal"= "hotpink", "Paternal"="skyblue3")) +
+  scale_color_manual(values = c("Maternal" = "hotpink", "Paternal" = "skyblue3")) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1.2)) +
+  geom_text(
+    data = stats_asterisks,
+    aes(x = Generation, y = y.position, label = signif),
+    inherit.aes = FALSE,
+    size = 5
+  ) +
   theme_bw() +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
-    strip.text = element_text(size = 8)
+    strip.text = element_text(size = 8),
+    legend.position = "bottom"
+  )
+
+
+
+
+#########Frequency plot separated by replicate
+infection_data_reps <- DGRP %>%
+  filter(Infected %in% c("Yes", "No")) %>%
+  group_by(Generation, Cross, Parent_Infected, Replicate) %>% 
+  summarise(
+    infected_count = sum(Infected == "Yes", na.rm = TRUE),
+    total_count = n(),
+    .groups = "drop"
+  ) %>%
+  filter(total_count > 0) %>%
+  mutate(
+    infection_freq = infected_count / total_count
+  ) %>%
+  bind_cols(
+    binom.confint(x = .$infected_count, n = .$total_count, methods = "wilson")[, c("lower", "upper")]
+  )
+
+
+ggplot(infection_data_reps, aes(
+  x = Generation, 
+  y = infection_freq, 
+  color = as.factor(Replicate))) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.1) +
+  facet_grid(Parent_Infected ~ Cross) +
+  labs(
+    x = "Generation",
+    y = "Percent Infected",
+    color = "Replicate"
   ) +
-  ylim(0, 1.2)+
-  theme(legend.position="bottom")
+  scale_color_brewer(palette = "Dark2") +  # Dark2 palette
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 8),
+    legend.position = "bottom"
+  )
+
+#Supplemental Figure 2
+maternal_p <-
+  ggplot(filter(infection_data_reps, Parent_Infected == "Maternal"),
+         aes(
+           x = Generation,
+           y = infection_freq * 100,
+           color = as.factor(Replicate),
+           group = Replicate)) +
+  geom_point(size = 1.5) +
+  geom_line(linewidth = 0.5, linetype = "dotted") +
+  facet_grid(Replicate ~ Cross) +
+  labs(
+    x = "",
+    y = "Percent Infected",
+    color = "Replicate"
+  ) +
+  scale_color_brewer(palette = "Dark2") +  # Dark2 palette
+  scale_y_continuous(breaks = c(0,50,100)) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 8),
+    legend.position = "none"
+  )
 
 
+paternal_p <-
+  ggplot(filter(infection_data_reps, Parent_Infected == "Paternal"),
+         aes(
+           x = Generation,
+           y = infection_freq * 100,
+           color = as.factor(Replicate),
+           group = Replicate)) +
+  geom_point(size = 1.5) +
+  geom_line(linewidth = 0.5, linetype = "dotted") +
+  facet_grid(Replicate ~ Cross) +
+  labs(
+    x = "Generation",
+    y = "Percent Infected",
+    color = "Replicate"
+  ) +
+  scale_color_brewer(palette = "Dark2") +  # Dark2 palette
+  scale_y_continuous(breaks = c(0,50,100)) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 8),
+    legend.position = "bottom"
+  )
 
 
+maternal_p / paternal_p+plot_annotation(tag_levels = "A")
+
+ggsave("prevalence_by_replicate.pdf", width = 7.5, height=7, units="in")
 
 
-#####function to plot individual crosses
-#############SEE IF STATS ARE ACCURATE, MIGHT NEED TO CHANGE THE WAY THEY ARE CALCULATED!!!!!!!!!!!
+#Median for Offspring Sex
 
-plot_cross_data <- function(data, cross_value) {
-  # Filter for each cross
-  filtered_data <- data[data$Cross == cross_value, ]
-  
-  # Add a pseudocount to the dCt values where they are 0 (replace 0 with 1e-10)
-  filtered_data$dCt_modified <- ifelse(filtered_data$dCt == 0, 1e-10, filtered_data$dCt)
-  
-  # Plot
-  p <- ggplot(filtered_data, aes(
-    x = Parent_Infected,
-    y = dCt_modified,
-    color = as.factor(Replicate),
-    shape = Offspring_Sex,
-    group = Parent_Infected
-  )) +
-    geom_jitter(height = 0, width = 0.1) +
-    facet_wrap(~Generation) +
-    scale_y_log10() +
-    ylab("Galbut virus relative to RpL32 (log scale, pseudocounts applied)") +
-    xlab("Initial infected parent") +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-    theme(strip.text.x.top = element_text(size = 6)) +
-    
+medians_offspring <- DGRP %>%
+  filter(Infected == "Yes") %>%
+  group_by(Generation, Offspring_Sex) %>%
+  summarise(
+    median_value = median(dCt_modified, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-    stat_compare_means(
-      aes(x = Parent_Infected, y = dCt_modified),
-      data = filtered_data,  # Use the modified data for stats
-      method = "wilcox", paired = FALSE
-    )+
-  theme_bw()+
-    labs(color= "Replicate", shape = "Offspring Sex")
-  
-  return(p)
-}
-
-plot_cross_data(DGRP, "W1118")
-
-
-
-
-
-
-
-
-
-#####offspring sex
-ggplot(DGRP, aes(x=Offspring_Sex, y=dCt_modified, color=Cross, group=Offspring_Sex))+
-  geom_jitter(width=.2)+stat_compare_means(method= "wilcox", paired= FALSE, label= "p.signif", label.x.npc = "center")+
-  ylab("Galbut virus Ct relative to RpL32")+xlab("Offspring Sex")+labs(color="Fly Line")+
-  facet_grid(~Generation)+scale_y_log10()
-
-
-
-
-
+#Figure 4
 
 sex_plot<-ggplot(DGRP, aes(x=Offspring_Sex, y=dCt_modified, color=Offspring_Sex, group=Offspring_Sex))+
   geom_jitter(width=.2, aes(alpha = is_pseudocount), show.legend = FALSE)+
@@ -346,9 +533,7 @@ sex_plot<-ggplot(DGRP, aes(x=Offspring_Sex, y=dCt_modified, color=Offspring_Sex,
   xlab("Offspring Sex")+coord_cartesian(clip="off")+
   labs(color="", alpha="")+theme_bw()+ 
   facet_wrap(~Generation)+scale_color_manual(values= c("Female"= "mediumorchid", "Male"="palegreen2"))+
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
-  stat_compare_means(paired=FALSE, method="wilcox", label="p.signif", label.x.npc = "center", show.legend = FALSE)
-
+  stat_compare_means(paired=FALSE, method="wilcox.test", label="p.signif", label.x.npc = "center", show.legend = FALSE)
 
 
 sex_plot
@@ -373,16 +558,56 @@ infection_data_sex <- DGRP %>%
 
 
 
+# Calculate Fisher's exact test for each Generation
+fisher_results_sex <- infection_data_sex %>%
+  group_by(Generation) %>%
+  summarise(
+    fisher_p = {
+      sexes <- sort(unique(Offspring_Sex))
+      if (length(sexes) == 2) {
+        # 2x2 table: rows = Sex, columns = infected/not infected
+        tab <- matrix(
+          c(
+            infected_count[Offspring_Sex == sexes[1]],
+            total_count[Offspring_Sex == sexes[1]] - infected_count[Offspring_Sex == sexes[1]],
+            infected_count[Offspring_Sex == sexes[2]],
+            total_count[Offspring_Sex == sexes[2]] - infected_count[Offspring_Sex == sexes[2]]
+          ),
+          nrow = 2,
+          byrow = TRUE,
+          dimnames = list(
+            Sex = sexes,
+            Infection = c("Infected", "Not Infected")
+          )
+        )
+        fisher.test(tab)$p.value
+      } else {
+        NA_real_
+      }
+    },
+    .groups = "drop"
+  )
+
+# Make label data frame for plotting (one label per Generation)
+pval_labels_sex <- infection_data_sex %>%
+  distinct(Generation) %>%
+  left_join(fisher_results_sex, by = "Generation") %>%
+  mutate(
+    label = paste0("p-value = ", signif(fisher_p, 2)),
+    y_pos = 0  # adjust for your plot's y-scale
+  )
+
+
+
 
 sex_freq<-ggplot(infection_data_sex, aes(x = Offspring_Sex, y = infection_freq, color=Offspring_Sex)) +
   geom_point(show.legend = FALSE) +
   ylab("Prevalence of \nGalbut virus Infection") +
   xlab("Offspring Sex") +
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
   scale_fill_brewer(palette = "Dark2") +
   theme_bw() +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
     strip.text = element_text(size = 9),
     panel.border = element_rect(color = "black", size = 0.9)
     
@@ -390,25 +615,19 @@ sex_freq<-ggplot(infection_data_sex, aes(x = Offspring_Sex, y = infection_freq, 
   facet_wrap(~Generation, nrow=1)+
   scale_color_manual(values=c("mediumorchid", "palegreen2"))+
   geom_errorbar(aes(ymin = lower, ymax = upper),
-                width = 0.2, show.legend=FALSE)
+                width = 0.2, show.legend=FALSE)+   geom_text(
+                  data = pval_labels_sex,
+                  aes(x = "Male", y = y_pos, label = label),
+                  inherit.aes = FALSE
+                )
+  
 
 sex_freq
 
-(sex_plot/ sex_freq)+plot_layout(axes="collect")+plot_annotation(tag_levels = "A")
+(sex_freq/sex_plot)+plot_layout(axes="collect")+plot_annotation(tag_levels = "A")
 
 
-
-
-
-
-
-compare_means(dCt~Parent_Infected, data=DGRP, method="wilcox", paired= FALSE)
-
-compare_means(dCt~Offspring_Sex, data=DGRP, method="wilcox", paired = FALSE)
-
-
-
-######EMBRYOS
+#Figure 5
 eggs <- eggs %>%
   mutate(
     dCt_modified = ifelse(dCt == 0, 1e-6, dCt),
@@ -418,20 +637,18 @@ eggs <- eggs %>%
 eggs$Infected <- factor(eggs$Infected, levels=c("Yes", "No"))
 
 
-
 egg_plot<-ggplot(eggs, aes(x=Parent_Infected, y=dCt_modified, color=Parent_Infected, group=Parent_Infected))+
   geom_jitter(width=.2, aes(alpha = is_pseudocount), show.legend = FALSE)+
   scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.15), guide="none")+
   ggtitle("")+ scale_y_log10()+
   ylab("Galbut virus RNA \nrelative to RpL32 mRNA")+
   xlab("Transmission Type")+coord_cartesian(clip="off")+
-  stat_compare_means(paired=FALSE, method="wilcox", label="p.signif", label.x.npc = "center", show.legend = FALSE)+
+  stat_compare_means(paired=FALSE, method="wilcox", show.legend = FALSE)+
   labs(color="", alpha="")+theme_bw()+facet_grid(~Cross)+  scale_color_manual(values= c("Maternal"= "orange2", "Paternal"="darkred"))+
   theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 
-compare_means(dCt~Parent_Infected, data=eggs, method="wilcox", paired = FALSE)
 
-
+egg_plot
 
 
 infection_data_eggs <- eggs %>%
@@ -451,7 +668,50 @@ infection_data_eggs <- eggs %>%
     binom.confint(x = .$infected_count, n = .$total_count, methods = "wilson")[, c("lower", "upper")]
   )
 
+# Fisher’s exact test for each Cross
+fisher_results <- infection_data_eggs %>%
+  group_by(Cross) %>%
+  summarise(
+    fisher_p = {
+      if (all(c("Maternal", "Paternal") %in% Parent_Infected)) {
+        tab <- matrix(
+          c(
+            infected_count[Parent_Infected == "Maternal"],
+            total_count[Parent_Infected == "Maternal"] - infected_count[Parent_Infected == "Maternal"],
+            infected_count[Parent_Infected == "Paternal"],
+            total_count[Parent_Infected == "Paternal"] - infected_count[Parent_Infected == "Paternal"]
+          ),
+          nrow = 2,
+          byrow = TRUE,
+          dimnames = list(
+            Parent = c("Maternal", "Paternal"),
+            Infection = c("Infected", "Not Infected")
+          )
+        )
+        fisher.test(tab)$p.value
+      } else {
+        NA
+      }
+    },
+    .groups = "drop"
+  )
 
+# Merge p-values into main table
+infection_data_eggs <- left_join(infection_data_eggs, fisher_results, by = "Cross")
+
+
+#make a p-value label 
+pval_labels <- infection_data_eggs %>%
+  distinct(Cross, fisher_p) %>%
+  mutate(
+    label = paste0("p-value = ", signif(fisher_p, 2)),
+    Parent_Infected = "Paternal",
+    y_pos = 1.05
+  )
+
+
+
+####plot
 egg_freq<-ggplot(infection_data_eggs, aes(x = Parent_Infected, y = infection_freq, color = Parent_Infected)) +
   geom_point(show.legend = FALSE) +
   facet_grid(~Cross) +
@@ -463,54 +723,26 @@ egg_freq<-ggplot(infection_data_eggs, aes(x = Parent_Infected, y = infection_fre
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     strip.text = element_text(size = 9),
-    panel.border = element_rect(color = "black", size = 0.9)
+    panel.border = element_rect(color = "black", fill = NA, linewidth = .85)
+    
     
   )+
   scale_color_manual(values=c("orange2", "darkred"))+
   geom_errorbar(aes(ymin = lower, ymax = upper),
-                position = position_dodge(width = 0.9), width = 0.2, show.legend=FALSE)
+                position = position_dodge(width = 0.9), width = 0.2, show.legend=FALSE)+
+  geom_text(
+    data = pval_labels,
+    aes(x = Parent_Infected, y = y_pos, label = label),
+    inherit.aes = FALSE # shift slightly to the right of the point
+  )
 
 egg_freq
 
-(egg_plot/ egg_freq)+plot_layout(axes="collect")+plot_annotation(tag_levels = "A")
-
-
-#######eggs over time
-egg_time<-read_excel("./egg_trial.xlsx")
-
-
-ggplot(data=egg_time, aes(x=Combo, y=Count, color=Combo, fill=Combo))+
-  geom_col()+facet_wrap(~Hours, nrow=1)+ theme_bw()+scale_color_brewer(palette="Spectral")+scale_fill_brewer(palette="Spectral")+
-  labs(fill="Transmission", color= "Transmission")+xlab("Transmission Type")+ylab("Total Egg Count Per Day")+
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
-
-ggplot(data=egg_time, aes(x=Hours, y=Count, fill = as.factor(Hours)))+
-  geom_col()+facet_wrap(~Combo, nrow=1)+ theme_bw()+labs(fill= "Hours")
-
-
-compare_means(Count~Combo, data=egg_time, method="wilcox", paired=FALSE)
-
-
-#########25192
-egg_time_25192<-read_excel("./Egg_Trial_25192.xlsx")
-
-
-ggplot(data=egg_time_25192, aes(x=Parent_Infected, y=Count, color=Parent_Infected, fill=Parent_Infected))+
-  geom_col()+facet_wrap(~Hours, nrow=1)+ theme_bw()+scale_color_brewer(palette="Spectral")+scale_fill_brewer(palette="Spectral")+
-  labs(fill="Transmission", color= "Transmission")+xlab("Transmission Type")+ylab("Total Egg Count Per Day")+
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
-
-ggplot(data=egg_time_25192, aes(x=Hours, y=Count, fill = as.factor(Hours)))+
-  geom_col()+facet_wrap(~Parent_Infected, nrow=1)+ theme_bw()+labs(fill= "Hours")+
-  scale_fill_brewer(palette = "Spectral")
-
-
-compare_means(Count~Combo, data=egg_time, method="wilcox", paired=FALSE)
+(egg_freq/ egg_plot)+plot_layout(axes="collect")+plot_annotation(tag_levels = "A")
 
 
 
-
-##########28152
+#Figure 6
 egg_28152 <- egg_28152 %>%
   mutate(
     dCt_modified = ifelse(dCt == 0, 1e-7, dCt),
@@ -520,70 +752,240 @@ egg_28152$Parent_Infected <- factor(egg_28152$Parent_Infected, levels=c("Materna
 
 egg_28152$Infected <- factor(egg_28152$Infected, levels=c("Yes", "No"))
 
-two<- ggplot(egg_28152, aes(x=Parent_Infected, y=dCt_modified, group=Parent_Infected, color=Infected))+
-  geom_jitter(width=.2, aes(alpha = is_pseudocount))+
+two<- ggplot(egg_28152, aes(x=Parent_Infected, y=dCt_modified, group=Parent_Infected, color=dpi))+
+  geom_jitter(width=.2, aes(alpha = is_pseudocount), show.legend = FALSE)+
   scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.15), guide="none")+
   ggtitle("")+ scale_y_log10()+
-  ylab("Galbut virus Ct relative to RpL32 mRNA")+
-  xlab("Transmission Type")+coord_cartesian(clip="off")+
+  ylab("Galbut virus RNA \nrelative to RpL32 mRNA")+
+  xlab("")+coord_cartesian(clip="off")+
   labs(color="Tested \nPositive", alpha="")+theme_bw()+
   geom_signif(
-    comparisons = list(c("Maternal", "Paternal")), # replace with actual levels
-    map_signif_level = TRUE,
-    y_position = c(1e0), # Adjust to fit your y scale (log10)
+    comparisons = list(c("Maternal", "Paternal")), 
+    y_position = c(1e0), 
     tip_length = 0.01,
-    textsize = 4)+
+    textsize = 4, show.legend = FALSE, color="black")+
   facet_grid(~dpi)+
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
-  scale_color_brewer(palette= "Dark2")
+  scale_color_brewer(palette= "Dark2")+  xlab("Transmission Type")
+
+two
 
 
-one<- ggplot(egg_28152, aes(x=dpi, y=dCt_modified, color=Infected))+
-  geom_jitter(width=.2, aes(alpha = is_pseudocount))+
+parent_data_eggs <- egg_28152 %>%
+  filter(Infected %in% c("Yes", "No")) %>%
+  group_by(dpi, Parent_Infected) %>%
+  summarise(
+    infected_count = sum(Infected == "Yes", na.rm = TRUE),
+    total_count = n(),
+    .groups = "drop"
+  ) %>%
+  filter(total_count > 0) %>%
+  mutate(
+    infection_freq = infected_count / total_count,
+    percent_label = paste0(round(infection_freq * 100, 1), "%")
+  ) %>%
+  bind_cols(
+    binom.confint(x = .$infected_count, n = .$total_count, methods = "wilson")[, c("lower", "upper")]
+  )
+
+# Reorder factor levels
+parent_data_eggs <- parent_data_eggs %>%
+  mutate(Parent_Infected = factor(Parent_Infected, levels = c("Maternal", "Paternal", "Neither")))
+
+
+# Calculate Fisher's exact test per dpi (compare Maternal vs Paternal only)
+fisher_results_parent <- parent_data_eggs %>%
+  filter(Parent_Infected %in% c("Maternal", "Paternal")) %>%  # ignore Neither
+  group_by(dpi) %>%
+  summarise(
+    fisher_p = {
+      parents <- c("Maternal", "Paternal")
+      if (all(parents %in% Parent_Infected)) {
+        tab <- matrix(
+          c(
+            infected_count[Parent_Infected == "Maternal"],
+            total_count[Parent_Infected == "Maternal"] - infected_count[Parent_Infected == "Maternal"],
+            infected_count[Parent_Infected == "Paternal"],
+            total_count[Parent_Infected == "Paternal"] - infected_count[Parent_Infected == "Paternal"]
+          ),
+          nrow = 2,
+          byrow = TRUE,
+          dimnames = list(
+            Parent = parents,
+            Infection = c("Infected", "Not Infected")
+          )
+        )
+        fisher.test(tab)$p.value
+      } else {
+        NA_real_
+      }
+    },
+    .groups = "drop"
+  )
+
+# Create label data frame for plotting (one label per dpi)
+pval_labels_parent <- dpi_data_eggs %>%
+  distinct(dpi) %>%                     
+  left_join(fisher_results_parent, by = "dpi") %>%
+  mutate(
+    label = paste0("p-value = ", signif(fisher_p, 2)),
+    y_pos = 1.05                          
+  )
+
+
+
+
+parent_freq<-ggplot(parent_data_eggs, aes(x = Parent_Infected, y = infection_freq, color = dpi)) +
+  geom_point(show.legend = FALSE) +
+  facet_grid(~dpi) +
+  ylab("Prevalence of \nGalbut virus Infection") +
+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 9),
+    panel.border = element_rect(color = "black", size = 0.9))+
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                position = position_dodge(width = 0.9), width = 0.2, show.legend=FALSE)+
+  scale_color_brewer(palette="Dark2")+
+  geom_text(
+    data = pval_labels_parent,
+    aes(x = "Maternal", y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = -0.1  # shift slightly to the right of the point
+  )+xlab("")
+
+
+parent_freq
+
+one<- ggplot(egg_28152, aes(x=dpi, y=dCt_modified, color=dpi))+
+  geom_jitter(width=.2, aes(alpha = is_pseudocount), show.legend = FALSE)+
   scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.15), guide="none")+
   ggtitle("")+ scale_y_log10()+
-  ylab("Galbut virus Ct relative to RpL32 mRNA")+
-  xlab("Transmission Type")+coord_cartesian(clip="off")+
+  ylab("Galbut virus RNA \nrelative to RpL32 mRNA")+
+  xlab("")+coord_cartesian(clip="off")+
   labs(color="Tested \nPositive", alpha="")+theme_bw()+
   geom_signif(
-    comparisons = list(c("2 days post mating", "8 days post mating")), # replace with actual levels
+    comparisons = list(c("2 days post mating", "8 days post mating")), 
     map_signif_level = TRUE,
-    y_position = c(1e0), # Adjust to fit your y scale (log10)
+    y_position = c(1e0), 
     tip_length = 0.01,
     textsize = 4,
     color= "black")+
   facet_grid(~Parent_Infected)+
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
-  scale_color_brewer(palette= "Dark2")+xlab("Days Post Mating")
+  scale_color_brewer(palette= "Dark2")+  xlab("Days Post Mating")+theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 
 
-one/two+ plot_annotation(tag_levels = "A")
+one
+
+dpi_data_eggs <- egg_28152 %>%
+  filter(Infected %in% c("Yes", "No")) %>%
+  group_by(dpi, Parent_Infected) %>%
+  summarise(
+    infected_count = sum(Infected == "Yes", na.rm = TRUE),
+    total_count = n(),
+    .groups = "drop"
+  ) %>%
+  filter(total_count > 0) %>%
+  mutate(
+    infection_freq = infected_count / total_count,
+    percent_label = paste0(round(infection_freq * 100, 1), "%")
+  ) %>%
+  bind_cols(
+    binom.confint(x = .$infected_count, n = .$total_count, methods = "wilson")[, c("lower", "upper")]
+  )
+
+
+fisher_results_eggs <- dpi_data_eggs %>%
+  group_by(Parent_Infected) %>%
+  summarise(
+    fisher_p = {
+      dpis <- sort(unique(dpi))
+      if (length(dpis) == 2) {
+        # create 2x2 table: rows = dpi, columns = infected/not infected
+        tab <- matrix(
+          c(
+            infected_count[dpi == dpis[1]],
+            total_count[dpi == dpis[1]] - infected_count[dpi == dpis[1]],
+            infected_count[dpi == dpis[2]],
+            total_count[dpi == dpis[2]] - infected_count[dpi == dpis[2]]
+          ),
+          nrow = 2,
+          byrow = TRUE,
+          dimnames = list(
+            DPI = dpis,
+            Infection = c("Infected", "Not Infected")
+          )
+        )
+        fisher.test(tab)$p.value
+      } else {
+        NA_real_
+      }
+    },
+    .groups = "drop"
+  )
+
+# Make label data frame for plotting (one label per facet)
+pval_labels_dpi <- dpi_data_eggs %>%
+  distinct(Parent_Infected) %>%      # one row per facet
+  left_join(fisher_results_eggs, by = "Parent_Infected") %>%
+  mutate(
+    label = paste0("p-value = ", signif(fisher_p, 2)),
+    y_pos = 1.05  # adjust as needed for plotting
+  )
+
+
+
+
+dpi_freq<-ggplot(dpi_data_eggs, aes(x = dpi, y = infection_freq, color = dpi)) +
+  geom_point(show.legend = FALSE) +
+  facet_grid(~Parent_Infected) +
+  ylab("Prevalence of \nGalbut virus Infection") +
+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_bw() +
+  theme(
+    panel.border = element_rect(color = "black", size = 0.9)
+    
+  )+
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                position = position_dodge(width = 0.9), width = 0.2, show.legend=FALSE)+
+  scale_color_brewer(palette="Dark2")+
+  geom_text(
+    data = pval_labels_dpi,
+    aes(x = "2 days post mating", y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = -0.05  # shift slightly to the right of the point
+  )+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+xlab("")
+
+dpi_freq
+
+
+dpi_freq+parent_freq+one+two+plot_layout(ncol=2) +plot_annotation(tag_levels = list(c('A','C','B','D')))+plot_layout(axes="collect")
 
 
 compare_means(dCt~dpi, data=egg_28152, method="wilcox", paired = FALSE)
 compare_means(dCt~Parent_Infected, data=egg_28152, method="wilcox", paired = FALSE)
 compare_means(dCt~Treatment, data=egg_28152, method="wilcox", paired = FALSE)
 
-ggplot(egg_28152, aes(x=Parent_Infected, y=dCt_modified, group=Treatment, color= Treatment))+
-  geom_jitter(width=.2, aes(alpha = is_pseudocount))+
-  scale_alpha_manual(values = c("real" = 1, "pseudocount" = 0.15), guide="none")+
-  ggtitle("")+ scale_y_log10()+
-  ylab("Galbut virus Ct relative to RpL32")+
-  xlab("")+coord_cartesian(clip="off")+
-  labs(color="Treatment", alpha="")+theme_bw()+
-  geom_signif(
-    comparisons = list(c("Bleach", "EtOH")), # replace with actual levels
-    map_signif_level = TRUE,
-    y_position = c(1e0), # Adjust to fit your y scale (log10)
-    tip_length = 0.01,
-    textsize = 4)+
-scale_color_brewer(palette="Dark2")+
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+summary_table_eggs <- egg_28152 %>%
+  group_by(Parent_Infected, dpi, Infected) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = Infected,
+    values_from = count,
+    values_fill = 0
+  )
+
+summary_table_eggs
 
 
 
 
-
+#Supplemental Figure 3
 pct <- egg_28152 %>%
   group_by(Parent_Infected, Treatment, dpi) %>%
   summarize(
