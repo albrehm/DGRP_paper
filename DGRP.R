@@ -471,7 +471,7 @@ maternal_p <-
     y = "Percent Infected",
     color = "Replicate"
   ) +
-  scale_color_brewer(palette = "Dark2") +  # Dark2 palette
+  scale_color_brewer(palette = "Dark2") +  
   scale_y_continuous(breaks = c(0,50,100)) +
   theme_bw() +
   theme(
@@ -497,7 +497,7 @@ paternal_p <-
     y = "Percent Infected",
     color = "Replicate"
   ) +
-  scale_color_brewer(palette = "Dark2") +  # Dark2 palette
+  scale_color_brewer(palette = "Dark2") +  
   scale_y_continuous(breaks = c(0,50,100)) +
   theme_bw() +
   theme(
@@ -565,7 +565,6 @@ fisher_results_sex <- infection_data_sex %>%
     fisher_p = {
       sexes <- sort(unique(Offspring_Sex))
       if (length(sexes) == 2) {
-        # 2x2 table: rows = Sex, columns = infected/not infected
         tab <- matrix(
           c(
             infected_count[Offspring_Sex == sexes[1]],
@@ -594,7 +593,7 @@ pval_labels_sex <- infection_data_sex %>%
   left_join(fisher_results_sex, by = "Generation") %>%
   mutate(
     label = paste0("p-value = ", signif(fisher_p, 2)),
-    y_pos = 0  # adjust for your plot's y-scale
+    y_pos = 0  
   )
 
 
@@ -733,7 +732,7 @@ egg_freq<-ggplot(infection_data_eggs, aes(x = Parent_Infected, y = infection_fre
   geom_text(
     data = pval_labels,
     aes(x = Parent_Infected, y = y_pos, label = label),
-    inherit.aes = FALSE # shift slightly to the right of the point
+    inherit.aes = FALSE
   )
 
 egg_freq
@@ -794,7 +793,7 @@ parent_data_eggs <- parent_data_eggs %>%
 
 # Calculate Fisher's exact test per dpi (compare Maternal vs Paternal only)
 fisher_results_parent <- parent_data_eggs %>%
-  filter(Parent_Infected %in% c("Maternal", "Paternal")) %>%  # ignore Neither
+  filter(Parent_Infected %in% c("Maternal", "Paternal")) %>%  
   group_by(dpi) %>%
   summarise(
     fisher_p = {
@@ -852,7 +851,7 @@ parent_freq<-ggplot(parent_data_eggs, aes(x = Parent_Infected, y = infection_fre
     data = pval_labels_parent,
     aes(x = "Maternal", y = y_pos, label = label),
     inherit.aes = FALSE,
-    hjust = -0.1  # shift slightly to the right of the point
+    hjust = -0.1 
   )+xlab("")
 
 
@@ -902,7 +901,6 @@ fisher_results_eggs <- dpi_data_eggs %>%
     fisher_p = {
       dpis <- sort(unique(dpi))
       if (length(dpis) == 2) {
-        # create 2x2 table: rows = dpi, columns = infected/not infected
         tab <- matrix(
           c(
             infected_count[dpi == dpis[1]],
@@ -927,11 +925,11 @@ fisher_results_eggs <- dpi_data_eggs %>%
 
 # Make label data frame for plotting (one label per facet)
 pval_labels_dpi <- dpi_data_eggs %>%
-  distinct(Parent_Infected) %>%      # one row per facet
+  distinct(Parent_Infected) %>%     
   left_join(fisher_results_eggs, by = "Parent_Infected") %>%
   mutate(
     label = paste0("p-value = ", signif(fisher_p, 2)),
-    y_pos = 1.05  # adjust as needed for plotting
+    y_pos = 1.05 
   )
 
 
@@ -956,7 +954,7 @@ dpi_freq<-ggplot(dpi_data_eggs, aes(x = dpi, y = infection_freq, color = dpi)) +
     data = pval_labels_dpi,
     aes(x = "2 days post mating", y = y_pos, label = label),
     inherit.aes = FALSE,
-    hjust = -0.05  # shift slightly to the right of the point
+    hjust = -0.05 
   )+
   theme(axis.text.x=element_blank(),
         axis.ticks.x=element_blank())+xlab("")
